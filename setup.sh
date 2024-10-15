@@ -26,4 +26,5 @@ sudo apt-get update
 sudo apt-get install gcsfuse
 
 # Actually attach the bucket
+mkdir bucket
 gcsfuse othello-gpt ./bucket
