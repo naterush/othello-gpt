@@ -112,6 +112,7 @@ class Trainer:
             if not is_train:
                 test_loss = float(np.mean(losses))
                 logger.info("test loss: %f", test_loss)
+                wandb.log({"test_loss": test_loss})
                 return test_loss
             
             # log with wandb

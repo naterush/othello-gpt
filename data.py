@@ -16,6 +16,7 @@ from matplotlib.collections import PatchCollection
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
+from mingpt.dataset import CharDataset
 
 rows = list("abcdefgh")
 columns = [str(_) for _ in range(1, 9)]
@@ -110,19 +111,6 @@ def get_synthetic_dataset(total=None):
     sequences.sort()
     sequences = [k for k, _ in itertools.groupby(sequences)]
     return sequences
-
-
-
-class Othello:
-    def __init__(self, total=None):
-        self.sequences = get_synthetic_dataset(total=total)
-        self.board_size = 8 * 8
-        
-    def __len__(self, ):
-        return len(self.sequences)
-
-    def __getitem__(self, i):
-        return self.sequences[i]
 
 def get_ood_game(_):
     tbr = []
@@ -383,7 +371,17 @@ class OthelloBoardState():
                 self.__print__()
         return container
 
+def get_test_and_train_datasets(total=10000, train_ratio=0.8):
+    sequences = get_synthetic_dataset(total=total)
+    train_size = int(total * train_ratio)
+    
+    train_sequences = sequences[:train_size]
+    test_sequences = sequences[train_size:]
+
+    train_dataset = CharDataset(train_sequences)
+    test_dataset = CharDataset(test_sequences)
+
+    return train_dataset, test_dataset
+
 if __name__ == "__main__":
-    #create_synthetic_dataset(25 * 1000000)
-    othello = Othello()
-    print(len(othello))
+    pass

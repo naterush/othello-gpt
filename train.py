@@ -11,15 +11,15 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from data import Othello, permit, start_hands, OthelloBoardState, permit_reverse
 from mingpt.dataset import CharDataset
+from data import get_test_and_train_datasets
 from mingpt.utils import sample
 from mingpt.model import GPT, GPTConfig
 from mingpt.trainer import Trainer, TrainerConfig
 import wandb
 
 
-def train(train_dataset: CharDataset, model: GPT):
+def train(model: GPT, train_dataset: CharDataset, test_dataset: CharDataset):
 
     max_epochs = 250
     # initialize a trainer instance and kick off training
@@ -34,9 +34,8 @@ def train(train_dataset: CharDataset, model: GPT):
         num_workers=0, 
         ckpt_path=f"./checkpoints/gpt_at{t_start}.ckpt", 
     )
-    trainer = Trainer(model, train_dataset, None, tconf)
+    trainer = Trainer(model, train_dataset, test_dataset, tconf)
     device = trainer.device
-    print(device)
 
     # Start a new run
     wandb.init(project='othello', name=f"gpt_at{t_start}")
@@ -45,9 +44,8 @@ def train(train_dataset: CharDataset, model: GPT):
 
 if __name__ == '__main__':
 
-    othello = Othello(total=10000)
-    train_dataset = CharDataset(othello)
+    train_dataset, test_dataset = get_test_and_train_datasets(total=10000)
     mconf = GPTConfig(train_dataset.vocab_size, train_dataset.block_size, n_layer=8, n_head=8, n_embd=512)
     model = GPT(mconf)
 
-    train(train_dataset, model)
+    train(model, train_dataset, test_dataset)
