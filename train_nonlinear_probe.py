@@ -21,10 +21,9 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
-from data import get_othello
-from data.othello import permit, start_hands, OthelloBoardState
+from data import get_synthetic_dataset, OthelloBoardState
 from mingpt.dataset import CharDataset
-from mingpt.model import GPT, GPTConfig, GPTforProbing
+from mingpt.model import GPTConfig, GPTforProbing
 from mingpt.probe_trainer import Trainer, TrainerConfig
 from mingpt.probe_model import BatteryProbeClassification, BatteryProbeClassificationTwoLayer
 
@@ -70,8 +69,7 @@ if args.championship:
     folder_name = folder_name + "_championship"
 
 print(f"Running experiment for {folder_name}")
-othello = get_othello(data_root="data/othello_championship")
-
+othello = get_synthetic_dataset(only_full=True)
 train_dataset = CharDataset(othello)
 
 mconf = GPTConfig(train_dataset.vocab_size, train_dataset.block_size, n_layer=8, n_head=8, n_embd=512)

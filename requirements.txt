@@ -1,1 +1,5 @@
 wandb
+transformer-lens
+torcheval
+neel-plotly @ git+https://github.com/neelnanda-io/neel-plotly@main
+kaleido

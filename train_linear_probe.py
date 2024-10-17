@@ -1,12 +1,9 @@
-"""
-Script for training/evaluating probes.
-"""
-
 import json
 import random
 import os
 import numpy as np
 import torch
+import torch.nn as nn
 
 import einops
 from fancy_einsum import einsum
@@ -16,17 +13,61 @@ from tqdm import tqdm
 from transformer_lens_adapters import get_model_transformer_lens
 
 from othello_utils import (
+    state_stack_to_one_hot_threeway_black_white,
     state_stack_to_one_hot_threeway,
     build_state_stack,
 )
 
+from data import get_board_seqs_int_and_str
+
 random.seed(42)
 
+class LinearProbe(nn.Module):
+    def __init__(
+            self, 
+            d_model, 
+            modes, 
+            rows, 
+            cols, 
+            options
+        ):
+        super().__init__()
+        self.probe = nn.Parameter(
+            torch.randn(modes, d_model, rows, cols, options) / np.sqrt(d_model)
+        )
 
-# TODO
+    def forward(self, x, state_stack_one_hot):
+        probe_out = einsum(
+            "batch pos d_model, modes d_model rows cols options -> modes batch pos rows cols options",
+            x,
+            self.probe,
+        )
+        probe_log_probs = probe_out.log_softmax(-1)
+        probe_correct_log_probs = einops.reduce(
+            probe_log_probs * state_stack_one_hot,
+            "modes batch pos rows cols options -> modes pos rows cols",
+            "mean",
+        ) * 3  # 3 is the number of options (empty, white, black)
+        loss = -probe_correct_log_probs[0, :].mean(0).sum()
+        return probe_out, loss
+    
+PROBE_TYPE_TO_CLASS = {
+    'linear': LinearProbe,
+}
+
+ONE_HOT_TYPE_TO_FUNCTION = {
+    "black_white": state_stack_to_one_hot_threeway_black_white,
+    "mine_theirs": state_stack_to_one_hot_threeway,
+}
+
+def get_probe_file_name(config, probe_prediction, layer):
+    model_file_name = os.path.basename(config["model"]).split(".")[0]
+    final_output_dir = os.path.join(config["output_dir"], model_file_name)
+    probe_type = config["probe_type"]
+    return f"{final_output_dir}/resid_{probe_type}_{probe_prediction}_{layer}_.pth"
 
 def train(config):
-    """Train probe model."""
+    """Train parametric linear probe model."""
     print("Training config:")
     print(json.dumps(config, indent=4))
     othello_gpt = get_model_transformer_lens(config["model"])
@@ -44,7 +85,6 @@ def train(config):
     valid_patience = config["valid_patience"]
     output_dir = config["output_dir"]
 
-    # Model file name, not including file extension
     model_file_name = os.path.basename(config["model"]).split(".")[0]
     final_output_dir = os.path.join(output_dir, model_file_name)
 
@@ -52,8 +92,7 @@ def train(config):
     if not os.path.isdir(final_output_dir):
         os.makedirs(final_output_dir)
 
-    from data import get_board_seqs_int_and_str
-    board_seqs_int, board_seqs_string, board_seqs_int_validation, board_seqs_string_validation = get_board_seqs_int_and_str(100000)
+    board_seqs_int, board_seqs_string, board_seqs_int_validation, board_seqs_string_validation = get_board_seqs_int_and_str(config["num_games"])
 
     valid_indices = torch.arange(valid_size)
     valid_games_int = board_seqs_int_validation[valid_indices]
@@ -64,173 +103,126 @@ def train(config):
     modes = 1
     options = 3
 
-    for layer in tqdm(range(8)):
-        print(f"Training layer {layer}!")
-        done_training = False
-        probe_name = f"resid_{layer}_linear"
-        lowest_val_loss = 999999
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ProbeClass = PROBE_TYPE_TO_CLASS[config["probe_type"]]
 
-        probe_model = (
-            torch.randn(
-                modes,
-                othello_gpt.cfg.d_model,
-                rows,
-                cols,
-                options,
-                requires_grad=False,
-                device="cuda",
+    for probe_prediction, one_hot_function in ONE_HOT_TYPE_TO_FUNCTION.items():
+        print("Training: ", probe_prediction)
+        for layer in tqdm(range(8)):
+            print(f"Training layer {layer}!")
+            done_training = False
+            lowest_val_loss = float('inf')
+
+            probe_model = ProbeClass(othello_gpt.cfg.d_model, modes, rows, cols, options).to(device)
+            optimiser = torch.optim.AdamW(
+                probe_model.parameters(), lr=lr, betas=(0.9, 0.99), weight_decay=wd
             )
-            / np.sqrt(othello_gpt.cfg.d_model)
-        )
-        probe_model.requires_grad = True
-        optimiser = torch.optim.AdamW(
-            [probe_model], lr=lr, betas=(0.9, 0.99), weight_decay=wd
-        )
 
-        torch.manual_seed(42)
+            torch.manual_seed(42)
 
-        train_seen = 0
-        for epoch in range(num_epochs):
-            if done_training:
-                print(f"Training seen: {train_seen}")
-                break
 
-            full_train_indices = torch.randperm(train_size)
-            for idx in tqdm(range(0, train_size, batch_size)):
+            train_seen = 0
+            for epoch in range(num_epochs):
                 if done_training:
                     print(f"Training seen: {train_seen}")
                     break
-                train_seen += batch_size
-                indices = full_train_indices[idx : idx + batch_size]
-                games_int = board_seqs_int[indices]
-                games_str = board_seqs_string[indices]
-                state_stack = build_state_stack(games_str)
 
-                state_stack = state_stack[:, pos_start:pos_end, :, :]
+                full_train_indices = torch.randperm(train_size)
+                for idx in tqdm(range(0, train_size, batch_size)):
+                    if done_training:
+                        print(f"Training seen: {train_seen}")
+                        break
+                    train_seen += batch_size
+                    indices = full_train_indices[idx : idx + batch_size]
+                    games_int = board_seqs_int[indices]
+                    games_str = board_seqs_string[indices]
+                    state_stack = build_state_stack(games_str)
 
-                state_stack_one_hot = state_stack_to_one_hot_threeway(
-                    state_stack
-                ).cuda()
-                with torch.inference_mode():
-                    _, cache = othello_gpt.run_with_cache(
-                        games_int.cuda()[:, :-1], return_type=None
-                    )
+                    state_stack = state_stack[:, pos_start:pos_end, :, :]
 
-                    resid_post = cache["resid_post", layer][
-                        :, pos_start:pos_end
-                    ]
-
-                probe_out = einsum(
-                    "batch pos d_model, modes d_model rows cols options -> modes batch pos rows cols options",
-                    resid_post.clone(),
-                    probe_model,
-                )
-
-                # [modes, batch, pos, 8, 8, options]
-                probe_log_probs = probe_out.log_softmax(-1)
-
-                # [mode, pos, 8, 8]
-                probe_correct_log_probs = (
-                    einops.reduce(
-                        probe_log_probs * state_stack_one_hot,
-                        "modes batch pos rows cols options -> modes pos rows cols",
-                        "mean",
-                    )
-                    * options
-                )
-
-                train_loss = -probe_correct_log_probs[0, :].mean(0).sum()
-                train_loss.backward()
-
-                optimiser.step()
-                optimiser.zero_grad()
-
-                if idx % valid_every == 0:
-                    val_losses = []
-                    val_accuracies = []
-                    for val_batch_idx in range(0, valid_size, batch_size):
-                        _valid_indices = valid_indices[
-                            val_batch_idx : val_batch_idx + batch_size
-                        ]
-                        _valid_games_int = valid_games_int[_valid_indices]
-                        _valid_state_stack = valid_state_stack[_valid_indices]
-                        _valid_state_stack = _valid_state_stack[
-                            :, pos_start:pos_end, ...
-                        ]
-                        _valid_stack_one_hot = state_stack_to_one_hot_threeway(
-                            _valid_state_stack
-                        ).cuda()
-
-                        _val_logits, _val_cache = othello_gpt.run_with_cache(
-                            _valid_games_int.cuda()[:, :-1],
-                            return_type="logits",
+                    state_stack_one_hot = one_hot_function(state_stack.to(device))
+                    with torch.inference_mode():
+                        _, cache = othello_gpt.run_with_cache(
+                            games_int.to(device)[:, :-1], return_type=None
                         )
-                        val_resid_post = _val_cache["resid_post", layer][
+
+                        resid_post = cache["resid_post", layer][
                             :, pos_start:pos_end
                         ]
-                        _val_probe_out = einsum(
-                            "batch pos d_model, modes d_model rows cols options -> modes batch pos rows cols options",
-                            val_resid_post.clone(),
-                            probe_model,
-                        )
 
-                        _val_probe_log_probs = _val_probe_out.log_softmax(-1)
-                        val_probe_correct_log_probs = (
-                            einops.reduce(
-                                _val_probe_log_probs * _valid_stack_one_hot,
-                                "modes batch pos rows cols options -> modes pos rows cols",
-                                "mean",
+                    # Clone the resid_post tensor to allow gradient computation
+                    resid_post = resid_post.clone().detach().requires_grad_(True)
+                    _, train_loss = probe_model(resid_post, state_stack_one_hot)
+                    train_loss.backward()
+
+                    optimiser.step()
+                    optimiser.zero_grad()
+
+                    if idx % valid_every == 0:
+                        val_losses = []
+                        val_accuracies = []
+                        for val_batch_idx in range(0, valid_size, batch_size):
+                            _valid_indices = valid_indices[
+                                val_batch_idx : val_batch_idx + batch_size
+                            ]
+                            _valid_games_int = valid_games_int[_valid_indices]
+                            _valid_state_stack = valid_state_stack[_valid_indices]
+                            _valid_state_stack = _valid_state_stack[
+                                :, pos_start:pos_end, ...
+                            ]
+                            _valid_stack_one_hot = one_hot_function(_valid_state_stack.to(device))
+
+                            _val_logits, _val_cache = othello_gpt.run_with_cache(
+                                _valid_games_int.to(device)[:, :-1],
+                                return_type="logits",
                             )
-                            * options
-                        )
-                        val_loss = (
-                            -val_probe_correct_log_probs[0, :].mean(0).sum()
-                        ).item()
-                        val_losses.append(val_loss * _valid_indices.shape[0])
+                            val_resid_post = _val_cache["resid_post", layer][
+                                :, pos_start:pos_end
+                            ]
+                            _val_probe_out, val_loss = probe_model(val_resid_post, _valid_stack_one_hot)
 
-                        val_preds = _val_probe_out.argmax(-1)
-                        val_gold = _valid_stack_one_hot.argmax(-1)
+                            val_losses.append(val_loss.item() * _valid_indices.shape[0])
 
-                        val_results = val_preds == val_gold
-                        val_accuracy = (
-                            val_results.sum() / val_results.numel()
-                        ).item()
-                        val_accuracies.append(
-                            val_accuracy * _valid_indices.shape[0]
-                        )
+                            val_preds = _val_probe_out.argmax(-1)
+                            val_gold = _valid_stack_one_hot.argmax(-1)
 
-                    validation_loss = sum(val_losses) / valid_size
-                    validation_accuracy = sum(val_accuracies) / valid_size
-                    print(f"  Validation Accuracy: {validation_accuracy}")
-                    print(f"  Validation Loss: {validation_loss}")
-                    if validation_loss < lowest_val_loss:
-                        print(f"  New lowest valid loss! {validation_loss}")
-                        curr_patience = 0
-                        torch.save(
-                            probe_model, f"{final_output_dir}/{probe_name}.pth"
-                        )
+                            val_results = val_preds == val_gold
+                            val_accuracy = (
+                                val_results.sum() / val_results.numel()
+                            ).item()
+                            val_accuracies.append(
+                                val_accuracy * _valid_indices.shape[0]
+                            )
 
-                        lowest_val_loss = validation_loss
+                        validation_loss = sum(val_losses) / valid_size
+                        validation_accuracy = sum(val_accuracies) / valid_size
+                        print(f"  Validation Accuracy: {validation_accuracy}")
+                        print(f"  Validation Loss: {validation_loss}")
+                        if validation_loss < lowest_val_loss:
+                            print(f"  New lowest valid loss! {validation_loss}")
+                            curr_patience = 0
+                            torch.save(
+                                probe_model.state_dict(), get_probe_file_name(config, probe_prediction, layer)
+                            )
 
-                    else:
-                        curr_patience += 1
-                        print(
-                            f"  Did not beat previous best ({lowest_val_loss})"
-                        )
-                        print(f"  Current patience: {curr_patience}")
-                        if curr_patience >= valid_patience:
-                            print("  Ran out of patience! Stopping training.")
-                            done_training = True
-                            
+                            lowest_val_loss = validation_loss
 
+                        else:
+                            curr_patience += 1
+                            print(
+                                f"  Did not beat previous best ({lowest_val_loss})"
+                            )
+                            print(f"  Current patience: {curr_patience}")
+                            if curr_patience >= valid_patience:
+                                print("  Ran out of patience! Stopping training.")
+                                done_training = True
 
 def evaluate(config):
     """
-    Evaluate probe model.
+    Evaluate parametric linear probe model.
     """
     othello_gpt = get_model_transformer_lens(config["model"])
-    from data import get_board_seqs_int_and_str
-    board_seqs_int, board_seqs_string, _, _ = get_board_seqs_int_and_str(10000)
+    board_seqs_int, board_seqs_string, _, _ = get_board_seqs_int_and_str(config["num_games"])
 
     test_size = 1000
     board_seqs_int = board_seqs_int[-test_size:]
@@ -245,14 +237,19 @@ def evaluate(config):
     pos_start = 0
     pos_end = othello_gpt.cfg.n_ctx - 0
 
-    final_output_dir = os.path.join(config["output_dir"], os.path.basename(config["model"]).split(".")[0])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    for layer in range(8):
-        linear_probe = torch.load(os.path.join(final_output_dir, f"resid_{layer}_linear.pth"))
-        for test_layer in range(layer + 1):
-            if layer != test_layer:
-                continue
-            # print(f"Layer {test_layer}.")
+    modes = 1
+    options = 3
+
+    ProbeClass = PROBE_TYPE_TO_CLASS[config["probe_type"]]
+    for probe_prediction, one_hot_function in ONE_HOT_TYPE_TO_FUNCTION.items():
+
+        for layer in range(8):
+            probe_model = ProbeClass(othello_gpt.cfg.d_model, modes, config["rows"], config["cols"], options).to(device)
+            probe_model.load_state_dict(torch.load(get_probe_file_name(config, probe_prediction, layer)))
+            probe_model.eval()
+
             accs = []
             per_timestep_num_correct = torch.zeros((59, 8, 8))
             all_preds = []
@@ -261,27 +258,19 @@ def evaluate(config):
                 indices = all_indices[idx : idx + batch_size]
                 _games_int = games_int[indices]
 
-                # state_stack = orig_state_stack[:, pos_start:pos_end, :, :]
                 state_stack = orig_state_stack[
                     indices, pos_start:pos_end, :, :
                 ]
-                state_stack_one_hot = state_stack_to_one_hot_threeway(
-                    state_stack
-                ).cuda()
+                state_stack_one_hot = one_hot_function(state_stack.to(device))
 
                 logits, cache = othello_gpt.run_with_cache(
-                    _games_int.cuda()[:, :-1], return_type="logits"
+                    _games_int.to(device)[:, :-1], return_type="logits"
                 )
-                resid_post = cache["resid_post", test_layer][
+                resid_post = cache["resid_post", layer][
                     :, pos_start:pos_end
                 ]
-                probe_out = einsum(
-                    "batch pos d_model, modes d_model rows cols options -> modes batch pos rows cols options",
-                    resid_post.clone(),
-                    linear_probe,
-                )
+                probe_out, _ = probe_model(resid_post, state_stack_one_hot)
 
-                # [256, 51, 8, 8]
                 preds = probe_out.argmax(-1)
                 groundtruth = state_stack_one_hot.argmax(-1)
                 test_results = preds == groundtruth
@@ -291,22 +280,22 @@ def evaluate(config):
                 all_groundtruths.append(groundtruth)
                 accs.append(test_acc * indices.shape[0])
 
-            if test_layer == layer:
-                _all_preds = torch.cat(all_preds, dim=1)
-                _all_gt = torch.cat(all_groundtruths, dim=1)
-                f1_score = multiclass_f1_score(
-                    _all_preds.view(-1), _all_gt.view(-1), num_classes=3
-                )
-                print(f"Layer {layer} F1_score: {f1_score}")
-
+            _all_preds = torch.cat(all_preds, dim=1)
+            _all_gt = torch.cat(all_groundtruths, dim=1)
+            f1_score = multiclass_f1_score(
+                _all_preds.view(-1), _all_gt.view(-1), num_classes=3
+            )
+            print(f"{probe_prediction}: Layer {layer} F1_score: {f1_score}")
 
 if __name__ == "__main__":
     train_config = {
         "model": "bucket/checkpoints/gpt_at_20241016_154216.ckpt",
+        "probe_type": "linear",
         "lr": 1e-2,
         "wd": 0.01,
         "rows": 8,
         "cols": 8,
+        "num_games": 10000,
         "valid_every": 200,
         "batch_size": 128,
         "pos_start": 0,
@@ -314,8 +303,11 @@ if __name__ == "__main__":
         "num_epochs": 1,
         "valid_size": 512,
         "valid_patience": 10,
-        "output_dir": "bucket/probes/linear",
+        "output_dir": "bucket/probes",
     }
 
-    #train(train_config)
+    train(train_config)
     evaluate(train_config)
+
+# TODO: make it so the probe_prediction and probe_type both save under different file names (same folder, perhaps)
+# and then we can read them in and see the predictions.

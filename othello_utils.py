@@ -114,6 +114,29 @@ def state_stack_to_one_hot_threeway(state_stack):
 
     return one_hot
 
+def state_stack_to_one_hot_threeway_black_white(state_stack):
+    """
+    Channel 0: empty
+    Channel 1: black
+    Channel 2: white
+    """
+    one_hot = torch.zeros(
+        1,  
+        state_stack.shape[0],  
+        state_stack.shape[1],  
+        8,  
+        8,  
+        3,  
+        device=state_stack.device,
+        dtype=torch.int,
+    )
+    
+    one_hot[..., 0] = (state_stack == 0)  # empty cells
+    one_hot[..., 1] = (state_stack == 1)  # black pieces
+    one_hot[..., 2] = (state_stack == -1)  # white pieces
+    
+    return one_hot
+
 
 def seq_to_state_stack(str_moves):
     if isinstance(str_moves, torch.Tensor):
