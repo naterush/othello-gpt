@@ -4,19 +4,16 @@ import os
 import numpy as np
 import random
 from tqdm import tqdm
-import time
 import multiprocessing
 import pickle
-import psutil
 import seaborn as sns
 import itertools
-from copy import copy, deepcopy
-from matplotlib.patches import Rectangle, Circle
+from copy import deepcopy
+from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
-from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
-from matplotlib.colors import LinearSegmentedColormap
 from mingpt.dataset import CharDataset
+import torch as t
 
 rows = list("abcdefgh")
 columns = [str(_) for _ in range(1, 9)]
@@ -66,7 +63,7 @@ import itertools
 import multiprocessing
 from tqdm import tqdm
 
-SYNTHETIC_PATH = 'othello_synthetic'
+SYNTHETIC_PATH = 'bucket/data/othello_synthetic'
 BATCH_SIZE = 10000  # Adjust this value as needed
 
 def create_synthetic_dataset(total=1000000):
@@ -96,11 +93,11 @@ def _save_batch(sequences, batch_index):
     with open(filepath, 'wb') as handle:
         pickle.dump(sequences, handle)
 
-def get_synthetic_dataset(total=None):
+def get_synthetic_dataset(total=None, only_full=False):
     """Load all pickle files from the synthetic dataset folder."""
     sequences = []
     pickle_files = os.listdir(SYNTHETIC_PATH)
-    num_pickles = len(pickle_files) if total is None else total // BATCH_SIZE
+    num_pickles = len(pickle_files) if total is None else max(total // BATCH_SIZE, 1)
 
     for i in tqdm(range(num_pickles)):
         filepath = os.path.join(SYNTHETIC_PATH, f'batch_{i}.pkl')
@@ -110,6 +107,14 @@ def get_synthetic_dataset(total=None):
     # Deduplicate after loading all batches
     sequences.sort()
     sequences = [k for k, _ in itertools.groupby(sequences)]
+
+    if len(sequences) > total:
+        sequences = sequences[:total]
+
+    # if only_full is true, we filter to full games
+    if only_full:
+        sequences = [seq for seq in sequences if len(seq) == 60]
+
     return sequences
 
 def get_ood_game(_):
@@ -383,5 +388,35 @@ def get_test_and_train_datasets(total=10000, train_ratio=0.8):
 
     return train_dataset, test_dataset
 
+def get_board_seqs_int_and_str(total=10000, train_ratio=0.8):
+    from othello_utils import to_int
+
+    base_path = 'bucket/data/probe_data'
+
+    if os.path.exists(base_path):
+        if os.path.exists(f'{base_path}/board_seqs_int{total}.pth'):
+            return t.load(f'{base_path}/board_seqs_int{total}.pth'), t.load(f'{base_path}/board_seqs_string{total}.pth'), t.load(f'{base_path}/board_seqs_int_validation{total}.pth'), t.load(f'{base_path}/board_seqs_string_validation{total}.pth')
+
+    sequences = get_synthetic_dataset(total=total, only_full=True)
+    train_size = int(total * train_ratio)
+
+    train_sequences = sequences[:train_size]
+    test_sequences = sequences[train_size:]
+
+    board_seqs_string = t.tensor(train_sequences)
+    board_seqs_string_validation = t.tensor(test_sequences)
+
+    board_seqs_int = t.tensor(to_int(board_seqs_string))
+    board_seqs_int_validation = t.tensor(to_int(board_seqs_string_validation))
+
+    # Write the data to disk
+    os.makedirs(base_path, exist_ok=True)
+    t.save(board_seqs_int, f'{base_path}/board_seqs_int{total}.pth')
+    t.save(board_seqs_string, f'{base_path}/board_seqs_string{total}.pth')
+    t.save(board_seqs_int_validation, f'{base_path}/board_seqs_int_validation{total}.pth')
+    t.save(board_seqs_string_validation, f'{base_path}/board_seqs_string_validation{total}.pth')
+
+    return board_seqs_int, board_seqs_string, board_seqs_int_validation, board_seqs_string_validation
+
 if __name__ == "__main__":
-    pass
+    get_board_seqs_int_and_str(100000)
