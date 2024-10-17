@@ -26,13 +26,13 @@ def train(model: GPT, train_dataset: CharDataset, test_dataset: CharDataset):
     t_start = time.strftime("_%Y%m%d_%H%M%S")
     tconf = TrainerConfig(
         max_epochs=max_epochs, 
-        batch_size=512,  # assuming 8 GPU's
+        batch_size=512 * 8,  # assuming 8 GPU's
         learning_rate=5e-4,
         lr_decay=True, 
         warmup_tokens=len(train_dataset)*train_dataset.block_size*5, 
         final_tokens=len(train_dataset)*train_dataset.block_size*max_epochs,
         num_workers=0, 
-        ckpt_path=f"./checkpoints/gpt_at{t_start}.ckpt", 
+        ckpt_path=f"./bucket/checkpoints/gpt_at{t_start}.ckpt", 
     )
     trainer = Trainer(model, train_dataset, test_dataset, tconf)
     device = trainer.device
@@ -44,7 +44,7 @@ def train(model: GPT, train_dataset: CharDataset, test_dataset: CharDataset):
 
 if __name__ == '__main__':
 
-    train_dataset, test_dataset = get_test_and_train_datasets(total=10000)
+    train_dataset, test_dataset = get_test_and_train_datasets(total=25 * 1000000) # 
     mconf = GPTConfig(train_dataset.vocab_size, train_dataset.block_size, n_layer=8, n_head=8, n_embd=512)
     model = GPT(mconf)
 
