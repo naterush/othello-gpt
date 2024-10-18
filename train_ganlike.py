@@ -1,6 +1,7 @@
 import json
 import random
 import os
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -179,7 +180,7 @@ def train(config):
 
     print(f"Starting othello_gpt accuracy: {get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string)}")
 
-    for epoch in tqdm(range(10000)):
+    for epoch in tqdm(range(100000)):
 
         # First, we select a random subset of the data that we're going to 
         # train on. This is equivalent to the random noise generated in a GAN
@@ -290,12 +291,92 @@ def train(config):
             print(f"  Validation Accuracy: {validation_accuracy}")
             print(f"  Validation Loss: {validation_loss}")
 
+    # Save the resulting models, under their current time
+    # in the bucket/gans/{} folder
+    start_time = int(time.time())
+    output_dir = os.path.join('bucket', "gans")
+    os.makedirs(output_dir, exist_ok=True)
+    torch.save(othello_gpt.state_dict(), f"{output_dir}/{start_time}_othello_gpt.pth")
+    torch.save(linear_probe.state_dict(), f"{output_dir}/{start_time}_linear_probe.pth")
+    return start_time
+
+def evaluate(start_time):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    othello_gpt = get_empty_transformer_lens()
+    othello_gpt.load_state_dict(torch.load(f"bucket/gans/{start_time}_othello_gpt.pth"))
+    othello_gpt.eval()
+
+    othello_gpt = othello_gpt.to(device)
+
+    linear_probe = LinearProbe(othello_gpt.cfg.d_model, 1, 8, 8, 3)
+    linear_probe.load_state_dict(torch.load(f"bucket/gans/{start_time}_linear_probe.pth"))
+    linear_probe.eval()
+    linear_probe = linear_probe.to(device)
+
+    board_seqs_int, board_seqs_string, board_seqs_int_validation, board_seqs_string_validation = get_board_seqs_int_and_str(10000)
+
+    valid_size = 512
+    batch_size = 128
+    pos_start = 0
+    pos_end = othello_gpt.cfg.n_ctx - 0
+    one_hot_function = state_stack_to_one_hot_threeway
+    layer = 6
+
+    valid_indices = torch.arange(valid_size)
+    valid_games_int = board_seqs_int_validation[valid_indices]
+    valid_games_str = board_seqs_string_validation[valid_indices]
+    valid_state_stack = build_state_stack(valid_games_str)
+    train_size = board_seqs_int.shape[0]
+
+    print(f"Othello_gpt accuracy: {get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string)}")
+    val_losses = []
+    val_accuracies = []
+    for val_batch_idx in range(0, valid_size, batch_size):
+        _valid_indices = valid_indices[
+            val_batch_idx : val_batch_idx + batch_size
+        ]
+        _valid_games_int = valid_games_int[_valid_indices].to(device)
+        _valid_state_stack = valid_state_stack[_valid_indices].to(device)
+        _valid_state_stack = _valid_state_stack[
+            :, pos_start:pos_end, ...
+        ]
+        _valid_stack_one_hot = one_hot_function(_valid_state_stack.to(device))
+
+        _val_logits, _val_cache = othello_gpt.run_with_cache(
+            _valid_games_int.to(device)[:, :-1],
+            return_type="logits",
+        )
+        val_resid_post = _val_cache["resid_post", layer][
+            :, pos_start:pos_end
+        ]
+        _val_probe_out, val_loss = linear_probe(val_resid_post, _valid_stack_one_hot)
+
+        val_losses.append(val_loss.item() * _valid_indices.shape[0])
+
+        val_preds = _val_probe_out.argmax(-1)
+        val_gold = _valid_stack_one_hot.argmax(-1)
+
+        val_results = val_preds == val_gold
+        val_accuracy = (
+            val_results.sum() / val_results.numel()
+        ).item()
+        val_accuracies.append(
+            val_accuracy * _valid_indices.shape[0]
+        )
+
+    validation_loss = sum(val_losses) / valid_size
+    validation_accuracy = sum(val_accuracies) / valid_size
+    print(f"  Validation Accuracy: {validation_accuracy}")
+    print(f"  Validation Loss: {validation_loss}")
+
+
+
 if __name__ == "__main__":
     train_config = {
-        "model": "bucket/checkpoints/gpt_at_20241016_154216.ckpt",
         "lr": 1e-2,
         "wd": 0.01,
-        "num_games": 1000000,
+        "num_games": 5000000,
         "valid_every": 20,
         "batch_size": 128,
         "pos_start": 0,
@@ -306,7 +387,8 @@ if __name__ == "__main__":
         "output_dir": "bucket/probes",
     }
 
-    train(train_config)
+    start_time = train(train_config)
+    evaluate(start_time)
 
 # TODO: make it so the probe_prediction and probe_type both save under different file names (same folder, perhaps)
 # and then we can read them in and see the predictions.
