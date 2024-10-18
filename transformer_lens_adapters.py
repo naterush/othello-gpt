@@ -50,6 +50,21 @@ def get_model_transformer_lens(checkpoint_path):
     model.load_and_process_state_dict(transformer_lens_state_dict)
     return model
 
+def get_empty_transformer_lens():
+    cfg = HookedTransformerConfig(
+        n_layers=8,
+        d_model=512,
+        d_head=64,
+        n_heads=8,
+        d_mlp=2048,
+        d_vocab=61,
+        n_ctx=59,
+        act_fn="gelu",
+        normalization_type="LNPre",
+    )
+    model = HookedTransformer(cfg)
+    return model
+
 
 def _convert_to_transformer_lens_format(in_sd, n_layers=8, n_heads=8):
     out_sd = {}

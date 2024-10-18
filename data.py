@@ -362,6 +362,7 @@ class OthelloBoardState():
             return forfeit_moves
         else:
             return []
+
  
     def get_gt(self, moves, func, prt=False):
         # takes a new move or new moves and update state
@@ -375,6 +376,22 @@ class OthelloBoardState():
             if prt:
                 self.__print__()
         return container
+
+
+def get_valid_moves(batch_seqs_strings):
+    from othello_utils import to_int
+    valid_moves = t.zeros((batch_seqs_strings.shape[0], 60, 61))
+    for i, batch_seq_string in enumerate(batch_seqs_strings):
+        ab = OthelloBoardState()
+        for j, move in enumerate(batch_seq_string):
+            tmp_valid_moves = ab.get_valid_moves() # [37, 26, 44, 19]
+            # So then the indexes:  get set to True for (0, 0, [34, 27, 41, 20]) = 1
+            
+            valid_moves[i, j, to_int(tmp_valid_moves)] = 1
+            ab.update([move, ])
+        del ab
+    return valid_moves
+
 
 def get_test_and_train_datasets(total=10000, train_ratio=0.8):
     sequences = get_synthetic_dataset(total=total)
