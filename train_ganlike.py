@@ -114,12 +114,12 @@ def get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string):
 
     othello_gpt.eval()  # Set the model to evaluation mode
 
-    num_games = 10
+    num_games = 128
 
     othello_gpt.eval()
 
     with torch.no_grad():
-        for i in tqdm(range(0, num_games, batch_size)):
+        for i in range(0, num_games, batch_size):
             batch_end = min(i + batch_size, num_games)
             batch_seqs_int = board_seqs_int[i:batch_end].to(device)
             batch_seqs_string = board_seqs_string[i:batch_end]
@@ -128,7 +128,6 @@ def get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string):
             # Get model predictions
             logits = othello_gpt(batch_seqs_int[:, :-1])
             predictions = logits.argmax(dim=-1) # Batch x 59
-
 
             # For every game in the batch, for every move in the game, check if it's valid
             for j in range(predictions.shape[0]):  # Iterate over the games
@@ -143,6 +142,22 @@ def get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string):
     accuracy = total_correct / total_predictions
     return accuracy
 
+def uniform_loss(predictions):
+    """
+    predictions: Tensor of shape (..., 8, 8, 3) containing logits. 
+    Notably, this uses KL divergence to calculate the loss between the predictions and a uniform distribution.
+    Which encourages the model to predict uniformly across the three classes.
+    """
+    # Apply softmax to convert logits to probabilities
+    probs = F.softmax(predictions, dim=-1)
+    # NOTE: we ignore the first dimension of the tensor, as it's the mode dimension, 
+    # which we're not interested in.
+    probs = probs[0, ...]
+    # Define the uniform distribution (1/3 for each class)
+    uniform_dist = torch.full_like(probs, 1 / 3)
+    # Calculate the KL divergence loss
+    kl_loss = F.kl_div(probs.log(), uniform_dist, reduction='batchmean')
+    return kl_loss
 
 def train(config):
     """Train parametric linear probe model."""
@@ -151,8 +166,8 @@ def train(config):
     othello_gpt: HookedTransformer = get_empty_transformer_lens().to(device) # type: ignore
     linear_probe: LinearProbe = LinearProbe(othello_gpt.cfg.d_model, 1, 8, 8, 3).to(device)
 
-    lr, wd, valid_every, batch_size, pos_start, pos_end, num_epochs, valid_size, valid_patience, output_dir = (
-        config["lr"], config["wd"], config["valid_every"], config["batch_size"], config["pos_start"], config["pos_end"], config["num_epochs"], config["valid_size"], config["valid_patience"], config["output_dir"],
+    epochs, alpha, lr, wd, valid_every, batch_size, pos_start, pos_end, num_epochs, valid_size, valid_patience, output_dir = (
+        config['epochs'], config['alpha'], config["lr"], config["wd"], config["valid_every"], config["batch_size"], config["pos_start"], config["pos_end"], config["num_epochs"], config["valid_size"], config["valid_patience"], config["output_dir"],
     )
     pos_start = 0
     pos_end = othello_gpt.cfg.n_ctx - 0
@@ -174,13 +189,17 @@ def train(config):
     valid_state_stack = build_state_stack(valid_games_str)
     train_size = board_seqs_int.shape[0]
 
-    # We just pick layer 6, as it's near the end and was quite accurate in detecting
-    # the mine vs. theirs linear world model
-    layer = 6
+    # We just pick layer 64 as it's near the start. And so the question is we can we 
+    # get the model to _not build_ the world model until later in the layers..
+    layer = 4
 
     print(f"Starting othello_gpt accuracy: {get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string)}")
+    start_time = int(time.time())
 
-    for epoch in tqdm(range(100000)):
+    output_dir = os.path.join('bucket', "gans")
+    os.makedirs(output_dir, exist_ok=True)
+
+    for epoch in range(epochs):
 
         # First, we select a random subset of the data that we're going to 
         # train on. This is equivalent to the random noise generated in a GAN
@@ -238,10 +257,10 @@ def train(config):
 
         # Then, we get the probe output, so we can calculate the entropy of the probe
         probe_out, _ = linear_probe(resid_post, state_stack_one_hot)
-        probe_entropy = -probe_out.log_softmax(-1).mean()
+        diff_from_uniform_loss = uniform_loss(probe_out)
 
         # Finally, we calculate the total loss
-        total_loss = test_loss #+ probe_entropy
+        total_loss = (alpha * test_loss)**2 + ((1 - alpha) * diff_from_uniform_loss)**2
         #print(f'Total loss: {total_loss}, Test loss: {test_loss}, Probe entropy: {probe_entropy}')
         total_loss.backward()
 
@@ -251,6 +270,7 @@ def train(config):
 
         if epoch % valid_every == 0:
             print(f"Epoch {epoch} othello_gpt accuracy: {get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string)}")
+            print(f'Total loss: {total_loss}, Test loss: {test_loss} = {round((alpha * test_loss.item())**2 / total_loss.item() * 100)}%, Probe entropy: {diff_from_uniform_loss} {round(((1 - alpha) * diff_from_uniform_loss.item())**2 / total_loss.item() * 100)}%')
             val_losses = []
             val_accuracies = []
             for val_batch_idx in range(0, valid_size, batch_size):
@@ -288,29 +308,26 @@ def train(config):
 
             validation_loss = sum(val_losses) / valid_size
             validation_accuracy = sum(val_accuracies) / valid_size
-            print(f"  Validation Accuracy: {validation_accuracy}")
-            print(f"  Validation Loss: {validation_loss}")
+            print(f"  Probe Validation Accuracy: {validation_accuracy}")
+            print(f"  Probe Validation Loss: {validation_loss}")
 
-    # Save the resulting models, under their current time
-    # in the bucket/gans/{} folder
-    start_time = int(time.time())
-    output_dir = os.path.join('bucket', "gans")
-    os.makedirs(output_dir, exist_ok=True)
-    torch.save(othello_gpt.state_dict(), f"{output_dir}/{start_time}_othello_gpt.pth")
-    torch.save(linear_probe.state_dict(), f"{output_dir}/{start_time}_linear_probe.pth")
+            # Save the resulting models, under their current time
+            # in the bucket/gans/{} folder
+            torch.save(othello_gpt.state_dict(), f"{output_dir}/{alpha}_othello_gpt.pth")
+            torch.save(linear_probe.state_dict(), f"{output_dir}/{alpha}_linear_probe.pth")
     return start_time
 
-def evaluate(start_time):
+def evaluate(start_time, alpha):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     othello_gpt = get_empty_transformer_lens()
-    othello_gpt.load_state_dict(torch.load(f"bucket/gans/{start_time}_othello_gpt.pth"))
+    othello_gpt.load_state_dict(torch.load(f"bucket/gans/{alpha}_othello_gpt.pth"))
     othello_gpt.eval()
 
     othello_gpt = othello_gpt.to(device)
 
     linear_probe = LinearProbe(othello_gpt.cfg.d_model, 1, 8, 8, 3)
-    linear_probe.load_state_dict(torch.load(f"bucket/gans/{start_time}_linear_probe.pth"))
+    linear_probe.load_state_dict(torch.load(f"bucket/gans/{alpha}_linear_probe.pth"))
     linear_probe.eval()
     linear_probe = linear_probe.to(device)
 
@@ -367,8 +384,8 @@ def evaluate(start_time):
 
     validation_loss = sum(val_losses) / valid_size
     validation_accuracy = sum(val_accuracies) / valid_size
-    print(f"  Validation Accuracy: {validation_accuracy}")
-    print(f"  Validation Loss: {validation_loss}")
+    print(f"  Probe Validation Accuracy: {validation_accuracy}")
+    print(f"  Probe Validation Loss: {validation_loss}")
 
 
 
@@ -379,6 +396,7 @@ if __name__ == "__main__":
         "num_games": 5000000,
         "valid_every": 20,
         "batch_size": 128,
+        'epochs': int(1e5),
         "pos_start": 0,
         "pos_end": 0,
         "num_epochs": 1,
@@ -387,8 +405,11 @@ if __name__ == "__main__":
         "output_dir": "bucket/probes",
     }
 
-    start_time = train(train_config)
-    evaluate(start_time)
+    for alpha in [.99, .999, .8, .5, .1, .01]:
+        print(f'\n\nRunning on {alpha}:')
+        train_config["alpha"] = alpha
+        start_time = train(train_config)
+        evaluate(start_time, alpha)
 
 # TODO: make it so the probe_prediction and probe_type both save under different file names (same folder, perhaps)
 # and then we can read them in and see the predictions.

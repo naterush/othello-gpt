@@ -341,7 +341,7 @@ if __name__ == "__main__":
         "output_dir": "bucket/probes",
     }
 
-    train(train_config)
+    #train(train_config)
     evaluate(train_config)
 
 # TODO: make it so the probe_prediction and probe_type both save under different file names (same folder, perhaps)
