@@ -173,7 +173,7 @@ def train(config):
     pos_end = othello_gpt.cfg.n_ctx - 0
 
     probe_optimizer = torch.optim.AdamW(
-        linear_probe.parameters(), lr=5e-4 * 3, betas=(0.9, 0.99), weight_decay=wd
+        linear_probe.parameters(), lr=5e-4, betas=(0.9, 0.99), weight_decay=wd
     )
     othello_gpt_optimizer = torch.optim.AdamW(
         othello_gpt.parameters(), lr=5e-4, betas=(0.9, 0.99), weight_decay=wd
@@ -256,11 +256,11 @@ def train(config):
         test_loss = F.cross_entropy(logits_reshaped, targets_reshaped, ignore_index=0)
 
         # Then, we get the probe output, so we can calculate the entropy of the probe
-        probe_out, _ = linear_probe(resid_post, state_stack_one_hot)
-        diff_from_uniform_loss = uniform_loss(probe_out)
+        probe_out, probe_loss = linear_probe(resid_post, state_stack_one_hot)
+        #diff_from_uniform_loss = uniform_loss(probe_out)
 
         # Finally, we calculate the total loss
-        total_loss = (alpha * test_loss)**2 + ((1 - alpha) * diff_from_uniform_loss)**2
+        total_loss = 50 * test_loss + 5 * probe_loss
         #print(f'Total loss: {total_loss}, Test loss: {test_loss}, Probe entropy: {probe_entropy}')
         total_loss.backward()
 
@@ -270,7 +270,7 @@ def train(config):
 
         if epoch % valid_every == 0:
             print(f"Epoch {epoch} othello_gpt accuracy: {get_accuracy_of_othello_gpt(othello_gpt, board_seqs_int, board_seqs_string)}")
-            print(f'Total loss: {total_loss}, Test loss: {test_loss} = {round((alpha * test_loss.item())**2 / total_loss.item() * 100)}%, Probe entropy: {diff_from_uniform_loss} {round(((1 - alpha) * diff_from_uniform_loss.item())**2 / total_loss.item() * 100)}%')
+            print(f'Total loss: {total_loss}, Test loss: {test_loss} = {round(50 * test_loss.item() / total_loss.item() * 100)}%, Negative probe loss: {probe_loss} {round(5 * probe_loss.item() / total_loss.item() * 100)}%')
             val_losses = []
             val_accuracies = []
             for val_batch_idx in range(0, valid_size, batch_size):
@@ -313,21 +313,21 @@ def train(config):
 
             # Save the resulting models, under their current time
             # in the bucket/gans/{} folder
-            torch.save(othello_gpt.state_dict(), f"{output_dir}/{alpha}_othello_gpt.pth")
-            torch.save(linear_probe.state_dict(), f"{output_dir}/{alpha}_linear_probe.pth")
+            torch.save(othello_gpt.state_dict(), f"{output_dir}/{alpha}_adversarial_othello_gpt.pth")
+            torch.save(linear_probe.state_dict(), f"{output_dir}/{alpha}_adversarial_linear_probe.pth")
     return start_time
 
-def evaluate(start_time, alpha):
+def evaluate(alpha):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     othello_gpt = get_empty_transformer_lens()
-    othello_gpt.load_state_dict(torch.load(f"bucket/gans/{alpha}_othello_gpt.pth"))
+    othello_gpt.load_state_dict(torch.load(f"bucket/gans/{alpha}_adversarial_othello_gpt.pth"))
     othello_gpt.eval()
 
     othello_gpt = othello_gpt.to(device)
 
     linear_probe = LinearProbe(othello_gpt.cfg.d_model, 1, 8, 8, 3)
-    linear_probe.load_state_dict(torch.load(f"bucket/gans/{alpha}_linear_probe.pth"))
+    linear_probe.load_state_dict(torch.load(f"bucket/gans/{alpha}_adversarial_linear_probe.pth"))
     linear_probe.eval()
     linear_probe = linear_probe.to(device)
 
@@ -368,7 +368,7 @@ def evaluate(start_time, alpha):
             :, pos_start:pos_end
         ]
         _val_probe_out, val_loss = linear_probe(val_resid_post, _valid_stack_one_hot)
-
+        print(_val_probe_out[0, 0, 0, 0, :])
         val_losses.append(val_loss.item() * _valid_indices.shape[0])
 
         val_preds = _val_probe_out.argmax(-1)
@@ -405,11 +405,10 @@ if __name__ == "__main__":
         "output_dir": "bucket/probes",
     }
 
-    for alpha in [.99, .999, .8, .5, .1, .01]:
-        print(f'\n\nRunning on {alpha}:')
-        train_config["alpha"] = alpha
-        start_time = train(train_config)
-        evaluate(start_time, alpha)
+    alpha = 1
+    train_config["alpha"] = alpha
+    start_time = train(train_config)
+    evaluate(alpha)
 
 # TODO: make it so the probe_prediction and probe_type both save under different file names (same folder, perhaps)
 # and then we can read them in and see the predictions.
