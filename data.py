@@ -406,13 +406,25 @@ def get_test_and_train_datasets(total=10000, train_ratio=0.8):
     return train_dataset, test_dataset
 
 def get_board_seqs_int_and_str(total=10000, train_ratio=0.8):
-    from othello_utils import to_int
+    from othello_utils import to_int, build_state_stack
 
     base_path = 'bucket/data/probe_data'
 
     if os.path.exists(base_path):
         if os.path.exists(f'{base_path}/board_seqs_int{total}.pth'):
-            return t.load(f'{base_path}/board_seqs_int{total}.pth'), t.load(f'{base_path}/board_seqs_string{total}.pth'), t.load(f'{base_path}/board_seqs_int_validation{total}.pth'), t.load(f'{base_path}/board_seqs_string_validation{total}.pth')
+            if not os.path.exists(f'{base_path}/state_stack{total}.pth'):
+                # We need to just regenerate this, as the state stack is not present
+                board_seqs_string = t.load(f'{base_path}/board_seqs_string{total}.pth')
+                board_seqs_string_validation = t.load(f'{base_path}/board_seqs_string_validation{total}.pth')
+                print("BUILDING STATE STACK")
+                state_stack = build_state_stack(board_seqs_string)
+                state_stack_validation = build_state_stack(board_seqs_string_validation)
+                print("DONE BUILDING STATE STACK")
+                t.save(state_stack, f'{base_path}/state_stack{total}.pth')
+                t.save(state_stack_validation, f'{base_path}/state_stack_validation{total}.pth')
+
+
+            return t.load(f'{base_path}/board_seqs_int{total}.pth'), t.load(f'{base_path}/board_seqs_string{total}.pth'), t.load(f'{base_path}/board_seqs_int_validation{total}.pth'), t.load(f'{base_path}/board_seqs_string_validation{total}.pth'), t.load(f'{base_path}/state_stack{total}.pth'), t.load(f'{base_path}/state_stack_validation{total}.pth')
 
     sequences = get_synthetic_dataset(total=total, only_full=True)
     train_size = int(total * train_ratio)
@@ -421,10 +433,13 @@ def get_board_seqs_int_and_str(total=10000, train_ratio=0.8):
     test_sequences = sequences[train_size:]
 
     board_seqs_string = t.tensor(train_sequences)
+    state_stack = build_state_stack(board_seqs_string)
     board_seqs_string_validation = t.tensor(test_sequences)
+    state_stack_validation = build_state_stack(board_seqs_string_validation)
 
     board_seqs_int = t.tensor(to_int(board_seqs_string))
     board_seqs_int_validation = t.tensor(to_int(board_seqs_string_validation))
+
 
     # Write the data to disk
     os.makedirs(base_path, exist_ok=True)
@@ -432,8 +447,10 @@ def get_board_seqs_int_and_str(total=10000, train_ratio=0.8):
     t.save(board_seqs_string, f'{base_path}/board_seqs_string{total}.pth')
     t.save(board_seqs_int_validation, f'{base_path}/board_seqs_int_validation{total}.pth')
     t.save(board_seqs_string_validation, f'{base_path}/board_seqs_string_validation{total}.pth')
+    t.save(state_stack, f'{base_path}/state_stack{total}.pth')
+    t.save(state_stack_validation, f'{base_path}/state_stack_validation{total}.pth')
 
-    return board_seqs_int, board_seqs_string, board_seqs_int_validation, board_seqs_string_validation
+    return board_seqs_int, board_seqs_string, board_seqs_int_validation, board_seqs_string_validation, state_stack, state_stack_validation
 
 if __name__ == "__main__":
     get_board_seqs_int_and_str(100000)

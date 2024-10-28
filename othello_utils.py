@@ -385,6 +385,8 @@ def build_state_stack(board_seqs_string):
     """
     state_stack = []
     for idx, seq in enumerate(board_seqs_string):
+        if idx % 1000 == 0:
+            print(f"Processing {idx}th sequence.")
         _stack = seq_to_state_stack(seq)
         state_stack.append(_stack)
     return torch.tensor(np.stack(state_stack))
