@@ -293,7 +293,7 @@ sweep_config = {
         'beta': {'values': [-1, -10, -50]},
         'batch_size': {'value': 512},
         'wd': {'value': 0.01},
-        'epochs': {'value': 10},
+        'epochs': {'value': 25},
         'valid_every': {'value': 1},
         'num_games': {'value': int(1e5)},
         'optimizer': {'values': ['sdg', 'adamw']},
@@ -304,28 +304,3 @@ if __name__ == "__main__":
     # Start sweep
     sweep_id = wandb.sweep(sweep_config, project="othello-privacy")
     wandb.agent(sweep_id, train_with_config())
-
-    """
-    # Train with a single configuration
-    config = {
-        "probe_lr": 1e-4,
-        "model_lr": 1e-4,
-        "probe_steps_per_epoch": 5,
-        "model_steps_per_epoch": 5,
-        "alpha": 50,
-        "beta": -50,
-        "batch_size": 512,
-        "wd": 0.01,
-        "epochs": 5,
-        "valid_every": 1,
-        "num_games": int(1e5),
-        "optimizer": "sdg",
-    }
-    import cProfile
-    def run_training():
-        train_with_config()(config)
-
-    # Profile the run
-    cProfile.run('run_training()', sort='cumtime')
-    """
-
